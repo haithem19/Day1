@@ -1,6 +1,3 @@
-from __future__ import annotations
-
-from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
 from urllib.request import urlretrieve
@@ -30,24 +27,37 @@ class Dense:
         self.b = np.zeros(self.units, dtype=np.float32)
         self.built = True
 
+    def _softmax(self, x):
+        shifted = x - np.max(x, axis=1, keepdims=True)
+        exp = np.exp(shifted)
+        return exp / np.sum(exp, axis=1, keepdims=True)
+
     def forward(self, x):
         self.last_input = x
         self.z = x @ self.W + self.b
-        if self.activation == 'relu':
+
+        if self.activation == "relu":
             self.a = np.maximum(0.0, self.z)
-        elif self.activation == 'softmax':
-            shifted = self.z - np.max(self.z, axis=1, keepdims=True)
-            exp = np.exp(shifted)
-            self.a = exp / np.sum(exp, axis=1, keepdims=True)
+        elif self.activation == "sigmoid":
+            self.a = 1.0 / (1.0 + np.exp(-self.z))
+        elif self.activation == "tanh":
+            self.a = np.tanh(self.z)
+        elif self.activation == "softmax":
+            self.a = self._softmax(self.z)
         else:
             self.a = self.z
+
         return self.a
 
     def backward(self, grad_output):
-        if self.activation == 'relu':
+        if self.activation == "relu":
             grad_z = grad_output * (self.z > 0)
-        elif self.activation == 'softmax':
-            grad_z = grad_output
+        elif self.activation == "sigmoid":
+            grad_z = grad_output * (self.a * (1.0 - self.a))
+        elif self.activation == "tanh":
+            grad_z = grad_output * (1.0 - self.a**2)
+        elif self.activation == "softmax":
+            grad_z = grad_output * (self.a * (1.0 - self.a))
         else:
             grad_z = grad_output
 
@@ -56,35 +66,59 @@ class Dense:
         return grad_z @ self.W.T
 
 
-class AdamOptimizer:
-    def __init__(self, layers, learning_rate=0.001):
-        self.layers = layers
+class Adam:
+    def __init__(self, learning_rate=0.001):
         self.learning_rate = learning_rate
         self.beta1 = 0.9
         self.beta2 = 0.999
         self.epsilon = 1e-8
+
+
+class SGD:
+    def __init__(self, learning_rate=0.001):
+        self.learning_rate = learning_rate
+
+
+class _AdamState:
+    def __init__(self, layers, config):
+        self.layers = layers
+        self.learning_rate = config.learning_rate
+        self.beta1 = config.beta1
+        self.beta2 = config.beta2
+        self.epsilon = config.epsilon
         self.t = 0
         self.m = []
         self.v = []
         for layer in layers:
-            self.m.append({'W': np.zeros_like(layer.W), 'b': np.zeros_like(layer.b)})
-            self.v.append({'W': np.zeros_like(layer.W), 'b': np.zeros_like(layer.b)})
+            self.m.append({"W": np.zeros_like(layer.W), "b": np.zeros_like(layer.b)})
+            self.v.append({"W": np.zeros_like(layer.W), "b": np.zeros_like(layer.b)})
 
     def step(self):
         self.t += 1
         for index, layer in enumerate(self.layers):
-            self.m[index]['W'] = self.beta1 * self.m[index]['W'] + (1 - self.beta1) * layer.grad_W
-            self.m[index]['b'] = self.beta1 * self.m[index]['b'] + (1 - self.beta1) * layer.grad_b
-            self.v[index]['W'] = self.beta2 * self.v[index]['W'] + (1 - self.beta2) * (layer.grad_W ** 2)
-            self.v[index]['b'] = self.beta2 * self.v[index]['b'] + (1 - self.beta2) * (layer.grad_b ** 2)
+            self.m[index]["W"] = self.beta1 * self.m[index]["W"] + (1 - self.beta1) * layer.grad_W
+            self.m[index]["b"] = self.beta1 * self.m[index]["b"] + (1 - self.beta1) * layer.grad_b
+            self.v[index]["W"] = self.beta2 * self.v[index]["W"] + (1 - self.beta2) * (layer.grad_W**2)
+            self.v[index]["b"] = self.beta2 * self.v[index]["b"] + (1 - self.beta2) * (layer.grad_b**2)
 
-            m_hat_w = self.m[index]['W'] / (1 - self.beta1 ** self.t)
-            m_hat_b = self.m[index]['b'] / (1 - self.beta1 ** self.t)
-            v_hat_w = self.v[index]['W'] / (1 - self.beta2 ** self.t)
-            v_hat_b = self.v[index]['b'] / (1 - self.beta2 ** self.t)
+            m_hat_w = self.m[index]["W"] / (1 - self.beta1**self.t)
+            m_hat_b = self.m[index]["b"] / (1 - self.beta1**self.t)
+            v_hat_w = self.v[index]["W"] / (1 - self.beta2**self.t)
+            v_hat_b = self.v[index]["b"] / (1 - self.beta2**self.t)
 
             layer.W -= self.learning_rate * m_hat_w / (np.sqrt(v_hat_w) + self.epsilon)
             layer.b -= self.learning_rate * m_hat_b / (np.sqrt(v_hat_b) + self.epsilon)
+
+
+class _SGDState:
+    def __init__(self, layers, config):
+        self.layers = layers
+        self.learning_rate = config.learning_rate
+
+    def step(self):
+        for layer in self.layers:
+            layer.W -= self.learning_rate * layer.grad_W
+            layer.b -= self.learning_rate * layer.grad_b
 
 
 class Sequential:
@@ -99,10 +133,22 @@ class Sequential:
                 layer.build(current_dim)
             current_dim = layer.units
 
-    def compile(self, optimizer='adam', loss='sparse_categorical_crossentropy', metrics=None):
+    def compile(self, optimizer="adam", loss="sparse_categorical_crossentropy", metrics=None):
         self.loss_name = loss
         self.metrics = metrics or []
-        self.optimizer_name = optimizer
+
+        if isinstance(optimizer, str):
+            if optimizer.lower() == "adam":
+                self.optimizer_config = Adam(learning_rate=0.001)
+            elif optimizer.lower() == "sgd":
+                self.optimizer_config = SGD(learning_rate=0.001)
+            else:
+                raise ValueError(f"Unsupported optimizer string: {optimizer}")
+        elif isinstance(optimizer, (Adam, SGD)):
+            self.optimizer_config = optimizer
+        else:
+            raise ValueError("Unsupported optimizer type")
+
         self.compiled = True
 
     def summary(self):
@@ -131,21 +177,35 @@ class Sequential:
             out = layer.forward(out)
         return out
 
-    def _loss_and_grad(self, y_true, probs):
-        y_true = y_true.astype(int)
-        probs = np.clip(probs, 1e-7, 1 - 1e-7)
-        one_hot = np.zeros_like(probs)
-        one_hot[np.arange(len(y_true)), y_true] = 1.0
-        loss = -np.mean(np.sum(one_hot * np.log(probs), axis=1))
-        grad = probs - one_hot
-        return loss, grad
+    def _loss_and_grad(self, y_true, outputs):
+        outputs = np.clip(outputs, 1e-7, 1 - 1e-7)
+
+        if self.loss_name == "sparse_categorical_crossentropy":
+            y_true = y_true.astype(int)
+            one_hot = np.zeros_like(outputs)
+            one_hot[np.arange(len(y_true)), y_true] = 1.0
+            loss = -np.mean(np.sum(one_hot * np.log(outputs), axis=1))
+            grad = outputs - one_hot
+            predictions = np.argmax(outputs, axis=1)
+            accuracy = float(np.mean(predictions == y_true))
+            return loss, grad, accuracy
+
+        if self.loss_name == "binary_crossentropy":
+            y_true = y_true.reshape(-1, 1).astype(np.float32)
+            loss = -np.mean(y_true * np.log(outputs) + (1 - y_true) * np.log(1 - outputs))
+            grad = outputs - y_true
+            predictions = (outputs.flatten() > 0.5).astype(np.int64)
+            accuracy = float(np.mean(predictions == y_true.flatten().astype(np.int64)))
+            return loss, grad, accuracy
+
+        raise ValueError(f"Unsupported loss: {self.loss_name}")
 
     def fit(self, X, y, epochs=1, batch_size=32, validation_split=0.0, verbose=1):
         history = History()
-        history.history = {'loss': [], 'accuracy': []}
+        history.history = {"loss": [], "accuracy": []}
         if validation_split:
-            history.history['val_loss'] = []
-            history.history['val_accuracy'] = []
+            history.history["val_loss"] = []
+            history.history["val_accuracy"] = []
 
         if epochs == 0:
             return history
@@ -153,24 +213,30 @@ class Sequential:
         X = X.astype(np.float32)
         y = y.astype(np.int64)
         n_samples = len(X)
+
         indices = np.arange(n_samples)
         np.random.shuffle(indices)
         X = X[indices]
         y = y[indices]
 
         val_size = int(n_samples * validation_split)
-        if val_size:
+        if val_size > 0:
             X_val = X[-val_size:]
             y_val = y[-val_size:]
             X_train = X[:-val_size]
             y_train = y[:-val_size]
         else:
-            X_val = y_val = None
+            X_val = None
+            y_val = None
             X_train = X
             y_train = y
 
         self._build(X_train.shape[1])
-        optimizer = AdamOptimizer(self.layers, learning_rate=0.001)
+
+        if isinstance(self.optimizer_config, Adam):
+            optimizer = _AdamState(self.layers, self.optimizer_config)
+        else:
+            optimizer = _SGDState(self.layers, self.optimizer_config)
 
         for epoch in range(epochs):
             perm = np.random.permutation(len(X_train))
@@ -181,54 +247,59 @@ class Sequential:
                 end = start + batch_size
                 xb = X_train[start:end]
                 yb = y_train[start:end]
-                probs = self._forward(xb)
-                _, grad = self._loss_and_grad(yb, probs)
+
+                outputs = self._forward(xb)
+                _, grad, _ = self._loss_and_grad(yb, outputs)
+
                 back = grad
+                batch_n = len(xb)
                 for layer in reversed(self.layers):
                     back = layer.backward(back)
-                    layer.grad_W /= len(xb)
-                    layer.grad_b /= len(xb)
+                    layer.grad_W /= batch_n
+                    layer.grad_b /= batch_n
+
                 optimizer.step()
 
-            train_probs = self._forward(X_train)
-            train_loss, _ = self._loss_and_grad(y_train, train_probs)
-            train_acc = float(np.mean(np.argmax(train_probs, axis=1) == y_train))
-            history.history['loss'].append(train_loss)
-            history.history['accuracy'].append(train_acc)
+            train_outputs = self._forward(X_train)
+            train_loss, _, train_acc = self._loss_and_grad(y_train, train_outputs)
+            history.history["loss"].append(float(train_loss))
+            history.history["accuracy"].append(float(train_acc))
 
-            if val_size:
-                val_probs = self._forward(X_val)
-                val_loss, _ = self._loss_and_grad(y_val, val_probs)
-                val_acc = float(np.mean(np.argmax(val_probs, axis=1) == y_val))
-                history.history['val_loss'].append(val_loss)
-                history.history['val_accuracy'].append(val_acc)
+            if val_size > 0:
+                val_outputs = self._forward(X_val)
+                val_loss, _, val_acc = self._loss_and_grad(y_val, val_outputs)
+                history.history["val_loss"].append(float(val_loss))
+                history.history["val_accuracy"].append(float(val_acc))
 
             if verbose:
                 message = f"Epoch {epoch + 1}/{epochs} - loss: {train_loss:.4f} - accuracy: {train_acc:.4f}"
-                if val_size:
+                if val_size > 0:
                     message += f" - val_accuracy: {val_acc:.4f}"
                 print(message)
 
         return history
 
     def evaluate(self, X, y, verbose=0):
-        probs = self._forward(X.astype(np.float32))
-        loss, _ = self._loss_and_grad(y.astype(np.int64), probs)
-        acc = float(np.mean(np.argmax(probs, axis=1) == y))
-        return loss, acc
+        outputs = self._forward(X.astype(np.float32))
+        loss, _, acc = self._loss_and_grad(y.astype(np.int64), outputs)
+        return float(loss), float(acc)
+
+    def predict(self, X, verbose=0):
+        return self._forward(X.astype(np.float32))
 
 
 def _load_mnist_npz():
-    cache_dir = Path.home() / '.keras' / 'datasets'
+    cache_dir = Path.home() / ".keras" / "datasets"
     cache_dir.mkdir(parents=True, exist_ok=True)
-    file_path = cache_dir / 'mnist.npz'
+    file_path = cache_dir / "mnist.npz"
     if not file_path.exists():
-        urlretrieve('https://storage.googleapis.com/tensorflow/tf-keras-datasets/mnist.npz', file_path)
+        urlretrieve("https://storage.googleapis.com/tensorflow/tf-keras-datasets/mnist.npz", file_path)
     with np.load(file_path, allow_pickle=False) as data:
-        return (data['x_train'], data['y_train']), (data['x_test'], data['y_test'])
+        return (data["x_train"], data["y_train"]), (data["x_test"], data["y_test"])
 
 
 mnist = SimpleNamespace(load_data=_load_mnist_npz)
 datasets = SimpleNamespace(mnist=mnist)
 layers = SimpleNamespace(Dense=Dense)
+optimizers = SimpleNamespace(Adam=Adam, SGD=SGD)
 utils = SimpleNamespace(set_random_seed=set_random_seed)

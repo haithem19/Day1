@@ -24,21 +24,14 @@ def first_epoch_below_threshold(values, threshold=0.1):
     return 'N/A'
 
 
-def train_activation_case(name, hidden_activation, force_softmax_hidden=False):
+def train_activation_case(name, layer_dims_activations):
     tf.random.set_seed(42)
 
-    if force_softmax_hidden:
-        act1 = 'softmax'
-        act2 = 'softmax'
-    else:
-        act1 = hidden_activation
-        act2 = hidden_activation
-
-    model = keras.Sequential([
-        keras.layers.Dense(128, activation=act1, input_shape=(784,)),
-        keras.layers.Dense(64, activation=act2),
-        keras.layers.Dense(10, activation='softmax'),
-    ])
+    layers = [
+        keras.layers.Dense(units, activation=act, input_shape=(784,) if i == 0 else None)
+        for i, (units, act) in enumerate(layer_dims_activations)
+    ]
+    model = keras.Sequential(layers)
     model.compile(
         optimizer=keras.optimizers.Adam(learning_rate=0.001),
         loss='sparse_categorical_crossentropy',
@@ -71,13 +64,18 @@ def train_activation_case(name, hidden_activation, force_softmax_hidden=False):
 
 
 for activation in activations:
-    train_activation_case(activation, hidden_activation=activation)
+    train_activation_case(activation, [(128, activation), (64, activation), (10, 'softmax')])
 
 # Cas limite : couche dense linéaire (sans activation explicite)
-train_activation_case('linear', hidden_activation=None)
+train_activation_case('linear', [(128, None), (64, None), (10, 'softmax')])
 
 # Scénario adversarial : softmax aussi dans les couches cachées
-train_activation_case('softmax_hidden', hidden_activation='softmax', force_softmax_hidden=True)
+train_activation_case('softmax_hidden', [(128, 'softmax'), (64, 'softmax'), (10, 'softmax')])
+
+# Pour aller plus loin : impact de la profondeur avec ReLU (meilleure activation)
+train_activation_case('relu_shallow', [(256, 'relu'), (10, 'softmax')])
+train_activation_case('relu_medium', [(128, 'relu'), (64, 'relu'), (10, 'softmax')])
+train_activation_case('relu_deep', [(128, 'relu'), (64, 'relu'), (32, 'relu'), (10, 'softmax')])
 
 print('\n=== TABLEAU COMPARATIF ===')
 print(f"{'Activation':10s} | {'Val loss epoch 10':18s} | {'Test accuracy':14s} | {'Epoch < 0.1 loss':16s} | {'Temps (s)':10s}")
